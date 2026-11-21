@@ -2,7 +2,7 @@
 
 The command-line client for the [Proofline review API](https://proofline.sh/docs/). See the [CLI documentation](https://proofline.sh/docs/cli/) for commands.
 
-This repository is the published distribution of the Proofline CLI. `openapi.public.json` is the generated public API contract pinned for this revision. During the build, `build.rs` generates request URLs for the operations it declares. [Open an issue](https://github.com/prooflinedev/cli/issues) for changes to `openapi.public.json`, generated code, or workflows. Pull requests are welcome for the hand-written installer in `install.sh`, commands in `src/`, release scripts in `scripts/`, and tests in `tests/`.
+This repository is the published distribution of the Proofline CLI. `openapi.public.json` is the generated public API contract pinned for this revision. During the build, `build.rs` generates request URLs for the operations it declares. [Open an issue](https://github.com/prooflinedev/cli/issues) for changes to `openapi.public.json`, generated code, or workflows. Pull requests are welcome for the hand-written installers in `install.sh` and `install.ps1`, commands in `src/`, release scripts in `scripts/`, and tests in `tests/`.
 
 ## Installation and setup
 
@@ -12,7 +12,23 @@ On Linux and macOS, install the CLI with `curl -fsSL https://proofline.sh/cli | 
 
 ### Windows installation
 
-Official releases include `proofline-x86_64-pc-windows-msvc.tar.gz` with `proofline.exe`. Download the archive and `SHA256SUMS` from the same GitHub release, and compare its SHA-256 hash using `Get-FileHash -Algorithm SHA256`. Extract the archive with `tar -xzf` and put `proofline.exe` in a directory on `PATH`. Run `proofline login` to store credentials in Windows Credential Manager. To update, close running Proofline processes and replace the executable from a verified release. The Unix shell installer and self-update command do not install Windows binaries.
+On Windows x64, run [`install.ps1`](install.ps1) in PowerShell from a local checkout of this repository:
+
+```powershell
+.\install.ps1                        # Install or update to the latest release
+.\install.ps1 -Version 0.3.9         # Install a specific release
+.\install.ps1 -InstallDir 'C:\Tools\Proofline'
+```
+
+The installer downloads `proofline-x86_64-pc-windows-msvc.tar.gz` and `SHA256SUMS` from the same official GitHub release. It checks the archive before replacing `proofline.exe`. If a running Proofline process prevents an update, close it and run the installer again. Neither administrator access nor sign-in is needed to install to the default user directory, `%LOCALAPPDATA%\Proofline\bin`. The installer does not change `PATH`: use the full executable path, or add the install directory to your user `PATH` yourself. To sign in separately, run `proofline login`; on Windows it stores credentials in Windows Credential Manager.
+
+To install offline, download the archive and `SHA256SUMS` from the same [official GitHub release](https://github.com/prooflinedev/cli/releases/) into a folder, for example `C:\Downloads\Proofline Release`. Pass the path to that folder:
+
+```powershell
+.\install.ps1 -ReleaseDirectory 'C:\Downloads\Proofline Release'
+```
+
+Replace the example path with your own folder and do not combine `-ReleaseDirectory` with `-Version`. Only use release files from a source you trust. You can also verify the checksum with `Get-FileHash -Algorithm SHA256` and extract the official archive manually with `tar -xzf`. The Unix installer and the CLI's self-update command do not install Windows binaries.
 
 On Linux, coding agents that omit `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`
 can still use the stored sign-in when the standard `/run/user/<uid>/bus` socket
