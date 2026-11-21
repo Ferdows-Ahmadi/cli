@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,9 +34,21 @@ class WindowsInstaller(unittest.TestCase):
         self.temp.mkdir()
         self.install = self.root / "installed tools"
         self.executable = self.install / "proofline.exe"
+        self.test_driver = self.root / "fixture driver.ps1"
+        if os.name != "nt":
+            # Only the fixtures call the implementation directly on POSIX.
+            self.test_driver.write_text(
+                """[CmdletBinding()]
+param([string] $Version, [string] $InstallDir, [string] $ReleaseDirectory)
+. $env:PROOFLINE_INSTALLER_TEST_SOURCE
+Install-Proofline @PSBoundParameters
+""",
+                encoding="utf-8",
+            )
 
-    def fixture(self, contents, *, name="proofline.exe", checksum="valid"):
-        archive = self.release / ARCHIVE
+    def fixture(self, contents, *, name="proofline.exe", checksum="valid", release=None):
+        release = release or self.release
+        archive = release / ARCHIVE
         with tarfile.open(archive, "w:gz") as tar:
             entry = tarfile.TarInfo(name)
             entry.size = len(contents)
@@ -49,9 +62,13 @@ class WindowsInstaller(unittest.TestCase):
             "missing": f"{digest}  {ARCHIVE}.backup\n",
             "duplicate": line * 2,
         }
-        (self.release / "SHA256SUMS").write_text(cases[checksum], encoding="ascii")
+        (release / "SHA256SUMS").write_text(cases[checksum], encoding="ascii")
 
-    def run_installer(self, *options, local=True, extra_environment=None):
+    def run_installer(
+        self, *options, local=True, extra_environment=None, install_dir=None, public_entry=False
+    ):
+        destination = install_dir or self.install
+        entry = SCRIPT if os.name == "nt" or public_entry else self.test_driver
         result = subprocess.run(
             [
                 POWERSHELL,
@@ -59,9 +76,9 @@ class WindowsInstaller(unittest.TestCase):
                 "-NoProfile",
                 "-NonInteractive",
                 "-File",
-                str(SCRIPT),
+                str(entry),
                 "-InstallDir",
-                str(self.install),
+                str(destination),
                 *(["-ReleaseDirectory", str(self.release)] if local else []),
                 *options,
             ],
@@ -73,13 +90,25 @@ class WindowsInstaller(unittest.TestCase):
                 "TEMP": str(self.temp),
                 "TMP": str(self.temp),
                 "TMPDIR": str(self.temp),
+                "PROOFLINE_INSTALLER_TEST_SOURCE": str(SCRIPT),
                 **(extra_environment or {}),
             },
         )
         self.assertEqual(list(self.temp.iterdir()), [], result.stderr)
-        if self.install.is_dir():
-            self.assertEqual(set(self.install.iterdir()), {self.executable}, result.stderr)
+        if destination.is_dir():
+            self.assertEqual(set(destination.iterdir()), {destination / "proofline.exe"}, result.stderr)
         return result
+
+    @unittest.skipIf(os.name == "nt", "Requires a non-Windows host")
+    def test_public_installer_rejects_non_windows(self):
+        self.fixture(b"valid release fixture")
+        result = self.run_installer(
+            public_entry=True,
+            extra_environment={"OS": "Windows_NT", "PROCESSOR_ARCHITECTURE": "AMD64"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("This installer supports Windows x64 only.", result.stderr)
+        self.assertFalse(self.install.exists())
 
     def test_install_and_upgrade_in_path_with_spaces(self):
         for content, checksum in [(b"fixture version 1", "valid"), (b"fixture version 2", "binary")]:
@@ -136,14 +165,21 @@ class WindowsInstaller(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX shell mock; Windows uses curl.exe")
     def test_latest_and_pinned_use_one_official_release(self):
-        self.fixture(b"offline HTTP fixture")
         mock_bin = self.root / "tools"
         mock_bin.mkdir()
         request_log = self.root / "requests.jsonl"
         mock = mock_bin / "curl"
+        mock_source = self.root / "mock curl.py"
+        # Exercise the launcher with whitespace and a quote even if Python's
+        # real path happens to be simple on this machine.
+        interpreter = self.root / "fixture's Python"
+        interpreter.symlink_to(Path(sys.executable).resolve())
         mock.write_text(
-            f"""#!{sys.executable}
-import json, os, pathlib, shutil, sys
+            f'#!/bin/sh\nexec {shlex.quote(str(interpreter))} {shlex.quote(str(mock_source))} "$@"\n',
+            encoding="utf-8",
+        )
+        mock_source.write_text(
+            """import json, os, pathlib, shutil, sys
 arguments = sys.argv[1:]
 assert arguments[0] == "--disable"
 assert arguments[arguments.index("--proto") + 1] == "=https"
@@ -153,10 +189,11 @@ url = arguments[-1]
 with open(os.environ["FIXTURE_LOG"], "a") as log:
     print(json.dumps(url), file=log)
 if url == "https://api.github.com/repos/prooflinedev/cli/releases/latest":
-    output.write_text(json.dumps({{"tag_name": "v1.2.3"}}))
+    output.write_text(json.dumps({"tag_name": "v1.2.3"}))
 else:
+    tag, name = url.rsplit("/", 2)[1:]
     root = pathlib.Path(os.environ["FIXTURE_RELEASE"])
-    shutil.copyfile(root / url.rsplit("/", 1)[1], output)
+    shutil.copyfile(root / tag / name, output)
 """,
             encoding="utf-8",
         )
@@ -168,8 +205,16 @@ else:
         }
         for arguments, tag in [((), "v1.2.3"), (("-Version", "2.3.4"), "v2.3.4")]:
             with self.subTest(tag=tag):
+                release = self.release / tag
+                release.mkdir()
+                content = f"mock release {tag}".encode("ascii")
+                self.fixture(content, release=release)
+                install = self.root / f"installed {tag}"
+                self.assertFalse(install.exists())
                 request_log.write_text("", encoding="utf-8")
-                result = self.run_installer(*arguments, local=False, extra_environment=environment)
+                result = self.run_installer(
+                    *arguments, local=False, extra_environment=environment, install_dir=install
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 base = f"https://github.com/prooflinedev/cli/releases/download/{tag}"
                 expected = [
@@ -181,7 +226,7 @@ else:
                 self.assertEqual(
                     [json.loads(line) for line in request_log.read_text().splitlines()], expected
                 )
-                self.assertEqual(self.executable.read_bytes(), b"offline HTTP fixture")
+                self.assertEqual((install / "proofline.exe").read_bytes(), content)
 
 
 if __name__ == "__main__":
